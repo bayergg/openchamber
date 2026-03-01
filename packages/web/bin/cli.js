@@ -42,6 +42,20 @@ function isBunInstalled() {
 }
 
 function getPreferredServerRuntime() {
+  // Allow explicit override via environment variable (values: 'bun' | 'node')
+  const override = process.env.OPENCHAMBER_SERVER_RUNTIME;
+  if (override === 'bun' || override === 'node') {
+    return override;
+  }
+
+  // On Windows, Bun has a known crash when RSS reaches ~4GB
+  // ("integer does not fit in destination type" panic).
+  // Default to Node on Windows until this is resolved upstream.
+  // Set OPENCHAMBER_SERVER_RUNTIME=bun to opt back in.
+  if (process.platform === 'win32') {
+    return 'node';
+  }
+
   return isBunInstalled() ? 'bun' : 'node';
 }
 
@@ -607,9 +621,10 @@ const commands = {
       console.log('⚠️  Save this password - it won\'t be shown again!\n');
     }
 
-    // Prefer bun when installed (much faster PTY). If CLI is running under Node,
-    // run the server in a child process so Node doesn't have to load bun-pty.
-    if (preferredRuntime === 'bun' && !isBunRuntime()) {
+    // When the CLI runs under Node, spawn the server as a child process using the
+    // preferred runtime (bun or node). This avoids Node ESM import issues with
+    // Windows absolute paths and keeps PTY backend selection clean.
+    if (!isBunRuntime()) {
       const child = spawn(runtimeBin, serverArgs, {
         stdio: 'inherit',
         env: {
