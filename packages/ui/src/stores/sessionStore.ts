@@ -581,6 +581,23 @@ export const useSessionStore = create<SessionStore>()(
                             let usedGlobalFallback = false;
                             try {
                                 sessions = await listFromDirectoryScopedCall();
+
+                                // On Windows, older OpenCode versions stored sessions with backslash
+                                // directory paths while newer versions use forward slashes. The server
+                                // matches directory strings exactly, so we also query with the
+                                // platform-native (backslash) variant and merge the results.
+                                if (requestedDirectory.includes("/")) {
+                                    const nativePath = requestedDirectory.replace(/\//g, "\\");
+                                    try {
+                                        const nativeResponse = await apiClient.session.list({ directory: nativePath });
+                                        const nativeSessions = Array.isArray(nativeResponse.data) ? nativeResponse.data : [];
+                                        if (nativeSessions.length > 0) {
+                                            sessions = dedupeSessionsById([...sessions, ...nativeSessions]);
+                                        }
+                                    } catch {
+                                        // Ignore – the forward-slash results are still valid.
+                                    }
+                                }
                             } catch (error) {
                                 console.debug("Failed to list sessions for directory:", requestedDirectory, error);
                                 listError = error;
