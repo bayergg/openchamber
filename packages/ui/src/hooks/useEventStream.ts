@@ -1085,7 +1085,38 @@ export const useEventStream = (options?: { enabled?: boolean }) => {
           const textContent = (messagePart as { text?: unknown }).text;
 
           if (partType === 'tool' && toolName === 'question') {
-            requestPendingQuestionsRefresh();
+            requestPendingQuestionsRefresh(true);
+
+            // Synthesize question from tool part data when the server fails to
+            // emit the question.asked event.  A short delay allows the normal
+            // event to arrive first; if it does, dedup in addQuestion prevents
+            // duplicates.
+            if (toolState === 'running') {
+              const callID = (messagePart as { callID?: unknown }).callID;
+              const inputQuestions = (messagePart as { state?: { input?: { questions?: unknown } } }).state?.input?.questions;
+
+              if (typeof callID === 'string' && Array.isArray(inputQuestions) && inputQuestions.length > 0) {
+                const capturedSessionId = sessionId;
+                const capturedMessageId = messageId;
+                const capturedCallID = callID;
+                const capturedQuestions = inputQuestions;
+
+                setTimeout(() => {
+                  const existingQuestions = useSessionStore.getState().questions?.get(capturedSessionId);
+                  const alreadyKnown = existingQuestions?.some(
+                    (q) => q.id === capturedCallID || (q.tool?.callID && q.tool.callID === capturedCallID)
+                  );
+                  if (!alreadyKnown) {
+                    addQuestion({
+                      id: capturedCallID,
+                      sessionID: capturedSessionId,
+                      questions: capturedQuestions as QuestionRequest['questions'],
+                      tool: { messageID: capturedMessageId, callID: capturedCallID },
+                    });
+                  }
+                }, 500);
+              }
+            }
           }
 
           const isStreamingPart = (() => {
@@ -1112,10 +1143,9 @@ export const useEventStream = (options?: { enabled?: boolean }) => {
               typeof currentStatus.confirmedAt === 'number' &&
               Date.now() - currentStatus.confirmedAt < 1200;
             if (!currentStatus || currentStatus.type === 'idle') {
-              if (recentlyConfirmedIdle) {
-                break;
+              if (!recentlyConfirmedIdle) {
+                updateSessionStatus(sessionId, { type: 'busy' }, 'sse:message.part.updated');
               }
-              updateSessionStatus(sessionId, { type: 'busy' }, 'sse:message.part.updated');
             }
           }
         }
@@ -1468,7 +1498,46 @@ export const useEventStream = (options?: { enabled?: boolean }) => {
             && (part as { tool: string }).tool.toLowerCase() === 'question'
           ));
           if (hasQuestionTool) {
-            requestPendingQuestionsRefresh();
+            requestPendingQuestionsRefresh(true);
+
+            // Synthesize questions from tool parts when the server fails to
+            // emit question.asked events.
+            for (const part of partsArray) {
+              if (
+                part?.type !== 'tool' ||
+                typeof (part as { tool?: unknown }).tool !== 'string' ||
+                (part as { tool: string }).tool.toLowerCase() !== 'question'
+              ) continue;
+
+              const pCallID = (part as { callID?: unknown }).callID;
+              const pState = (part as { state?: { status?: unknown; input?: { questions?: unknown } } }).state;
+              if (
+                typeof pCallID !== 'string' ||
+                pState?.status !== 'running' ||
+                !Array.isArray(pState?.input?.questions) ||
+                pState.input.questions.length === 0
+              ) continue;
+
+              const capturedCallID = pCallID;
+              const capturedQuestions = pState.input.questions;
+              const capturedSessionId = sessionId;
+              const capturedMessageId = messageId;
+
+              setTimeout(() => {
+                const existing = useSessionStore.getState().questions?.get(capturedSessionId);
+                const known = existing?.some(
+                  (q) => q.id === capturedCallID || (q.tool?.callID && q.tool.callID === capturedCallID)
+                );
+                if (!known) {
+                  addQuestion({
+                    id: capturedCallID,
+                    sessionID: capturedSessionId,
+                    questions: capturedQuestions as QuestionRequest['questions'],
+                    tool: { messageID: capturedMessageId, callID: capturedCallID },
+                  });
+                }
+              }, 500);
+            }
           }
 
           const incomingLen = computeTextLength(partsArray);

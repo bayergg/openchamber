@@ -64,7 +64,10 @@ export const useQuestionStore = create<QuestionStore>()(
           }
 
           const existing = get().questions.get(sessionId);
-          if (existing?.some((entry) => entry.id === question.id)) {
+          if (existing?.some((entry) =>
+            entry.id === question.id ||
+            (question.tool?.callID && entry.tool?.callID && entry.tool.callID === question.tool.callID)
+          )) {
             return;
           }
 
@@ -91,12 +94,23 @@ export const useQuestionStore = create<QuestionStore>()(
         },
 
         respondToQuestion: async (sessionId: string, requestId: string, answers: string[] | string[][]) => {
-          await executeWithQuestionDirectory(sessionId, () => opencodeClient.replyToQuestion(requestId, answers));
+          try {
+            await executeWithQuestionDirectory(sessionId, () => opencodeClient.replyToQuestion(requestId, answers));
+          } catch (error) {
+            // Always dismiss locally so the UI is not permanently stuck.
+            // The server may never have registered this question (e.g. when
+            // it was synthesized from tool part data).
+            console.warn('[questionStore] Failed to submit question reply:', error);
+          }
           get().dismissQuestion(sessionId, requestId);
         },
 
         rejectQuestion: async (sessionId: string, requestId: string) => {
-          await executeWithQuestionDirectory(sessionId, () => opencodeClient.rejectQuestion(requestId));
+          try {
+            await executeWithQuestionDirectory(sessionId, () => opencodeClient.rejectQuestion(requestId));
+          } catch (error) {
+            console.warn('[questionStore] Failed to reject question:', error);
+          }
           get().dismissQuestion(sessionId, requestId);
         },
       }),
