@@ -484,6 +484,64 @@ export const ChatContainer: React.FC = () => {
         void load();
     }, [currentSessionId, hasHistoryMetadata, hasSessionMessagesEntry, isPinned, loadMessages, scrollToBottom, sessionMessages.length, sessionStatusForCurrent.type]);
 
+    // Reconcile orphaned question tool parts: when messages are loaded for a
+    // session that has a running question tool but no corresponding entry in
+    // the question store, synthesize the question from the tool part data.
+    // This handles the case where the server never emitted the question.asked
+    // SSE event (or it was lost), including already-stuck sessions on load.
+    const addQuestion = useSessionStore((state) => state.addQuestion);
+    React.useEffect(() => {
+        if (!currentSessionId || sessionMessages.length === 0 || scopedSessionIds.length === 0) {
+            return;
+        }
+
+        const questions = useSessionStore.getState().questions;
+
+        for (const msg of sessionMessages) {
+            if (msg.info?.role !== 'assistant' || !Array.isArray(msg.parts)) continue;
+            for (const part of msg.parts) {
+                if (part?.type !== 'tool') continue;
+
+                const toolPart = part as Part & { tool?: string; callID?: string; state?: { status?: string; input?: { questions?: unknown } } };
+                if (
+                    typeof toolPart.tool !== 'string' ||
+                    toolPart.tool.toLowerCase() !== 'question' ||
+                    toolPart.state?.status !== 'running' ||
+                    typeof toolPart.callID !== 'string'
+                ) continue;
+
+                const inputQuestions = toolPart.state?.input?.questions;
+                if (!Array.isArray(inputQuestions) || inputQuestions.length === 0) continue;
+
+                const sessionId = typeof (part as { sessionID?: unknown }).sessionID === 'string'
+                    ? (part as { sessionID: string }).sessionID
+                    : currentSessionId;
+                const messageId = typeof (part as { messageID?: unknown }).messageID === 'string'
+                    ? (part as { messageID: string }).messageID
+                    : (msg.info?.id ?? '');
+
+                // Check all scoped sessions for an existing question matching this tool call
+                let alreadyKnown = false;
+                for (const sid of scopedSessionIds) {
+                    const existing = questions?.get(sid);
+                    if (existing?.some((q) => q.id === toolPart.callID || (q.tool?.callID && q.tool.callID === toolPart.callID))) {
+                        alreadyKnown = true;
+                        break;
+                    }
+                }
+
+                if (!alreadyKnown) {
+                    addQuestion({
+                        id: toolPart.callID,
+                        sessionID: sessionId,
+                        questions: inputQuestions as QuestionRequest['questions'],
+                        tool: { messageID: messageId, callID: toolPart.callID },
+                    });
+                }
+            }
+        }
+    }, [currentSessionId, sessionMessages, scopedSessionIds, addQuestion]);
+
     if (!currentSessionId && !draftOpen) {
         return (
             <div
